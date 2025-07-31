@@ -1,0 +1,88 @@
+#include <esp_now.h>      // ESP-NOW communication library
+#include <WiFi.h>         // WIFI control library (needed for ESP-NOW)
+
+// Define sensor input pins
+#define VOLTAGE_SENSOR_PIN 34  // Analog input pin connected to voltage sensor output
+#define LM35_PIN 35            // Analog input pin connected to LM35 temperature sensor output
+#define LDR_PIN 32             // Analog input pin connected to LDR voltage divider output
+
+// MAC address of the receiver ESP32 (board 2 - gateway/display node)
+// Change this to the actual MAC address of your receiver ESP32
+uint8_t receiverAddress[] = {0xec, 0xe3, 0x34, 0xb4, 0x99, 0x78};
+
+// Structure to package sensor data before sending
+typedef struct struct_message {
+    float voltage;      // Measured voltage from solar panel
+    float temperature;  // Ambient temperature from LM35 sensor
+    int ldrValue;       // Light intensity reading from LDR (raw ADC value)
+} struct_message;
+
+// Instance of the structure to hold current sensor readings
+struct_message sensorData;
+
+void setup() {
+    Serial.begin(115200);          // Start serial communication for debugging
+    WiFi.mode(WIFI_STA);           // Set ESP32 to Station mode (required for ESP-NOW)
+
+    // Initialize ESP-NOW
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("Error initializing ESP-NOW");
+        return;                   // Stop if ESP-NOW initialization failed
+    }
+
+    // Configure the peer information (receiver ESP32)
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(peerInfo.peer_addr, receiverAddress, 6); // Copy receiver MAC address to peerInfo
+    peerInfo.channel = 0;        // Use current WiFi channel
+    peerInfo.encrypt = false;    // No encryption
+
+    // Add the receiver as a peer
+    if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+        Serial.println("Failed to add peer");
+        return;                 // Stop if adding peer failed
+    }
+}
+
+
+
+
+// Function to read and convert voltage sensor analog value
+float readVoltage() {
+   int adcValue = analogRead(VOLTAGE_SENSOR_PIN); // Read raw ADC (0-4095)
+    // Convert ADC value to voltage (0-3.3V), then scale by voltage divider factor (e.g., 5.0)
+    float voltage = (adcValue / 4095.0) * 3.3 * 5.0;  // Adjust '5.0' to match your voltage divider ratio
+    return voltage;
+}
+
+// Function to read and convert LM35 temperature sensor analog value
+float readTemperature() {
+    int adcValue = analogRead(LM35_PIN);             // Read raw ADC value from LM35
+    float voltage = (adcValue / 4095.0) * 3.3;       // Convert to voltage (0-3.3V)
+    float temperature = voltage * 100.0;             // LM35 outputs 10 mV per degree Celsius, so temperature = V*100
+    return temperature;
+}
+
+// Function to read LDR analog value directly (0-4095)
+int readLDR() {
+    return analogRead(LDR_PIN);
+}
+
+void loop() {
+    // Read sensors
+    sensorData.voltage = readVoltage();          // Get solar panel voltage
+    sensorData.temperature = readTemperature();  // Get ambient temperature
+    sensorData.ldrValue = readLDR();              // Get light intensity from LDR
+
+    // Send data to the receiver ESP32 using ESP-NOW
+    esp_now_send(receiverAddress, (uint8_t *)&sensorData, sizeof(sensorData));
+
+    // Print sensor readings to serial monitor for debugging
+    Serial.print("V: ");
+    Serial.print(sensorData.voltage);
+    Serial.print(" T: ");
+    Serial.print(sensorData.temperature);
+    Serial.print(" LDR: ");
+    Serial.println(sensorData.ldrValue);
+
+    delay(3000); // Wait for 3 seconds before sending next readings
+}
