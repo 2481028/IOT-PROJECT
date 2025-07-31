@@ -1,0 +1,123 @@
+#include <WiFi.h>               // ESP32 WiFi control library
+#include <esp_now.h>            // ESP-NOW protocol library for fast, connectionless ESP32 communication
+#include <Wire.h>               // I2C library for LCD
+#include <LiquidCrystal_I2C.h>  // Library for I2C LCD display
+#include <HTTPClient.h>         // HTTP Client library for ThingSpeak updates
+
+// Initialize the LCD object with I2C address 0x27, 16 columns and 2 rows
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// WiFi credentials to connect to your local WiFi network
+const char* ssid = "Galaxy A04s7C95";      // Replace with your WiFi SSID
+const char* password = "aaaaaaaa";          // Replace with your WiFi password
+
+// ThingSpeak Write API key and server URL
+String apiKey = "U9EXMXT3N2DIG0PG";        // Replace with your ThingSpeak Write API key
+const char* server = "http://api.thingspeak.com/update";
+
+// Define a data structure matching the sender ESP32 message format
+typedef struct struct_message {
+    float voltage;      // Solar panel voltage
+    float temperature;  // Ambient temperature from LM35
+    int ldrValue;       // Light intensity from LDR sensor
+} struct_message;
+
+// Global variable to store latest received sensor data
+struct_message latestData;
+
+// Flag to indicate that new sensor data has been received via ESP-NOW
+volatile bool newDataReceived = false;  
+
+// ESP-NOW receive callback function
+// Called automatically when new data is received from sender
+void onDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len) {
+    // Copy the received raw data bytes into the latestData struct
+    memcpy(&latestData, data, sizeof(latestData));
+    
+    // Set flag indicating new data available for main loop to process
+    newDataReceived = true; 
+
+    // Debug print received sensor values to Serial Monitor
+    Serial.printf("Received Data - V: %.2f, T: %.2f, LDR: %d\n", 
+                   latestData.voltage, latestData.temperature, latestData.ldrValue);
+}
+
+unsigned long previousMillis = 0;       // Stores last time LCD and ThingSpeak were updated
+const long interval = 3000;              // Update interval (milliseconds), 3000ms = 3 seconds
+
+void setup() {
+    Serial.begin(115200);    // Initialize serial communication for debugging
+    lcd.init();             // Initialize LCD display
+    lcd.backlight();        // Turn on LCD backlight
+    lcd.print("Waiting for data");  // Initial message on LCD
+
+    // Connect to WiFi network in Station mode
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+    
+    Serial.print("Connecting to WiFi");
+    // Wait until the ESP32 connects to WiFi (block here)
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nWiFi connected");
+
+    // Initialize ESP-NOW
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("Error initializing ESP-NOW");
+        while(true); // Halt execution here if ESP-NOW init fails
+    }
+
+    // Register the ESP-NOW receive callback
+    esp_now_register_recv_cb(onDataRecv);
+}
+
+void loop() {
+    unsigned long currentMillis = millis();  // Get current time since boot (milliseconds)
+
+    // Check if new sensor data has been received AND interval time has elapsed
+    if (newDataReceived && (currentMillis - previousMillis >= interval)) {
+        previousMillis = currentMillis;  // Update last update timestamp
+        newDataReceived = false;         // Reset new data flag
+
+        //---------- Update LCD Display ----------
+        lcd.clear();                     // Clear previous LCD content
+        lcd.setCursor(0, 0);             // Set cursor to first line, first position
+        lcd.print("V:");                 // Print Voltage label
+        lcd.print(latestData.voltage, 1);// Print voltage value with 1 decimal place
+        lcd.print(" T:");                 // Print Temperature label
+        lcd.print(latestData.temperature, 1);  // Print temperature value with 1 decimal place
+
+        lcd.setCursor(0, 1);             // Set cursor to second line
+        lcd.print("LDR:");               // Print LDR label
+        lcd.print(latestData.ldrValue);  // Print raw LDR value
+
+        //---------- Update ThingSpeak Cloud ----------
+        // Only update if WiFi connection is still active
+        if (WiFi.status() == WL_CONNECTED) {
+            HTTPClient http;  // HTTPClient object to send HTTP requests
+            
+            // Construct HTTP GET request URL with sensor values as fields
+            String url = String(server) + "?api_key=" + apiKey +
+                         "&field1=" + String(latestData.voltage) +
+                         "&field2=" + String(latestData.temperature) +
+                         "&field3=" + String(latestData.ldrValue);
+            
+            http.begin(url);            // Initialize HTTP connection
+            int httpCode = http.GET();  // Send HTTP GET request
+            
+            // Check response code and print status to Serial
+            if (httpCode > 0) {
+                Serial.printf("ThingSpeak update successful, code: %d\n", httpCode);
+            } else {
+                Serial.printf("ThingSpeak update failed, error: %s\n", http.errorToString(httpCode).c_str());
+            }
+            http.end();  // Close HTTP connection
+        } else {
+            // WiFi disconnected, skip cloud update and notify
+            Serial.println("WiFi not connected - skipping ThingSpeak update");
+        }
+    }
+    // No other processing needed inside loop; ESP-NOW callback updates latestData asynchronously
+}
